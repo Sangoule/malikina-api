@@ -10,6 +10,7 @@ import { authorRoutes } from './routes/authors.js';
 import categoriesRoutes from './routes/categories.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { promises as fs } from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -313,6 +314,45 @@ try {
   console.error('❌ PostgreSQL connection failed:', err);
   process.exit(1);
 }
+
+// Run pending migrations from db/migrations/ in order
+async function runMigrations() {
+  try {
+    // Create migrations tracking table if it doesn't exist
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS _migrations (
+        filename TEXT PRIMARY KEY,
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    const migrationsDir = path.join(__dirname, 'db/migrations');
+    let files: string[] = [];
+    try {
+      files = (await fs.readdir(migrationsDir))
+        .filter(f => f.endsWith('.sql'))
+        .sort();
+    } catch {
+      console.log('⚠️  No migrations directory found, skipping.');
+      return;
+    }
+
+    for (const file of files) {
+      const { rows } = await pool.query('SELECT 1 FROM _migrations WHERE filename = $1', [file]);
+      if (rows.length > 0) continue; // already applied
+
+      console.log(`🔄 Running migration: ${file}`);
+      const sql = await fs.readFile(path.join(migrationsDir, file), 'utf-8');
+      await pool.query(sql);
+      await pool.query('INSERT INTO _migrations (filename) VALUES ($1)', [file]);
+      console.log(`✅ Migration applied: ${file}`);
+    }
+  } catch (err) {
+    console.error('❌ Migration error:', err);
+  }
+}
+
+await runMigrations();
 
 // Auto-seed: seed database with sample data if empty
 await seedDatabase();
